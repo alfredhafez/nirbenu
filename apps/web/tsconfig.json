@@ -1,0 +1,13 @@
+{
+  "extends": "../../tooling/typescript/nextjs.json",
+  "include": [
+    "*.ts",
+    "*.tsx",
+    "next-env.d.ts",
+    "src",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

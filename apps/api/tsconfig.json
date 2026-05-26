@@ -1,0 +1,10 @@
+{
+  "extends": "../../tooling/typescript/worker.json",
+  "include": ["src"],
+  "compilerOptions": {
+    "paths": {
+      "@nirbenu/db": ["../../packages/db/src"],
+      "@nirbenu/shared": ["../../packages/shared/src"]
+    }
+  }
+}

@@ -1,0 +1,216 @@
+import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
+import { createDb } from '@nirbenu/db';
+import { donors, users } from '@nirbenu/db';
+import { donorSearchSchema } from '@nirbenu/shared';
+import { eq, and, like, sql, gte, lte, or } from 'drizzle-orm';
+import { requireAuth, getUserId, isAdmin } from '../middleware/auth';
+import type { Env } from '../index';
+
+export const donorsRoutes = new Hono<{ Bindings: Env; Variables: { userId?: string; userRole?: string } }>();
+
+// GET /api/donors — Public donor search with filters
+donorsRoutes.get('/', zValidator('query', donorSearchSchema), async (c) => {
+  const db = createDb(c.env.DB);
+  const { bloodGroup, district, area, availability, gender, verified, ranking, search, page, limit } = c.req.valid('query');
+
+  const conditions = [];
+
+  if (bloodGroup) conditions.push(eq(donors.bloodGroup, bloodGroup));
+  if (district) conditions.push(eq(donors.district, district));
+  if (area) conditions.push(like(donors.area, `%${area}%`));
+  if (availability) conditions.push(eq(donors.availability, availability));
+  if (gender) conditions.push(eq(donors.gender, gender));
+  if (verified !== undefined) conditions.push(eq(donors.verified, verified));
+  if (ranking) conditions.push(eq(donors.ranking, ranking));
+
+  let query = db.select().from(donors).leftJoin(users, eq(donors.id, users.id));
+
+  if (search) {
+    conditions.push(
+      or(like(users.name, `%${search}%`), like(donors.area, `%${search}%`))
+    );
+  }
+
+  if (conditions.length > 0) {
+    query = query.where(and(...conditions));
+  }
+
+  const totalResult = await db.select({ count: sql<number>`count(*)` }).from(donors).where(conditions.length > 0 ? and(...conditions) : undefined);
+  const total = Number(totalResult[0]?.count || 0);
+
+  const result = await query.limit(limit).offset((page - 1) * limit);
+
+  // Strip phone/email from public response
+  const data = result.map((r) => ({
+    ...r.donors,
+    user: {
+      id: r.users?.id,
+      name: r.users?.name,
+      avatarUrl: r.users?.avatarUrl,
+      role: r.users?.role,
+    },
+  }));
+
+  return c.json({
+    data,
+    total,
+    page,
+    totalPages: Math.ceil(total / limit),
+  });
+});
+
+// GET /api/donors/nearby
+donorsRoutes.get('/nearby', async (c) => {
+  const db = createDb(c.env.DB);
+  const district = c.req.query('district');
+  const bloodGroup = c.req.query('bloodGroup');
+
+  const conditions = [eq(donors.availability, 'available')];
+  if (district) conditions.push(eq(donors.district, district));
+  if (bloodGroup) conditions.push(eq(donors.bloodGroup, bloodGroup));
+
+  const result = await db
+    .select()
+    .from(donors)
+    .leftJoin(users, eq(donors.id, users.id))
+    .where(and(...conditions))
+    .orderBy(sql`${donors.donationCount} DESC`)
+    .limit(10);
+
+  const data = result.map((r) => ({
+    ...r.donors,
+    user: {
+      id: r.users?.id,
+      name: r.users?.name,
+      avatarUrl: r.users?.avatarUrl,
+      role: r.users?.role,
+    },
+  }));
+
+  return c.json({ data });
+});
+
+// GET /api/donors/:id — Single donor profile
+donorsRoutes.get('/:id', async (c) => {
+  const db = createDb(c.env.DB);
+  const id = c.req.param('id');
+  const currentUserId = getUserId(c);
+
+  const result = await db
+    .select()
+    .from(donors)
+    .leftJoin(users, eq(donors.id, users.id))
+    .where(eq(donors.id, id))
+    .limit(1);
+
+  if (!result.length) return c.json({ error: 'Donor not found' }, 404);
+
+  const donor = result[0];
+  const isOwnProfile = currentUserId === id;
+  const isAdminUser = isAdmin(c);
+
+  // Check if phone should be visible
+  let phone: string | null = null;
+  if (isOwnProfile || isAdminUser) {
+    phone = donor.users?.phone || null;
+  } else if (currentUserId) {
+    const contactReq = await db
+      .select()
+      .from(db._.schema.contactRequests)
+      .where(
+        and(
+          eq(db._.schema.contactRequests.donorId, id),
+          eq(db._.schema.contactRequests.requesterId, currentUserId),
+          eq(db._.schema.contactRequests.status, 'accepted'),
+          eq(db._.schema.contactRequests.numberVisible, true),
+        )
+      )
+      .limit(1);
+    if (contactReq.length) {
+      phone = donor.users?.phone || null;
+    }
+  }
+
+  return c.json({
+    ...donor.donors,
+    user: {
+      id: donor.users?.id,
+      name: donor.users?.name,
+      email: isOwnProfile || isAdminUser ? donor.users?.email : undefined,
+      avatarUrl: donor.users?.avatarUrl,
+      role: donor.users?.role,
+      phone,
+    },
+  });
+});
+
+// GET /api/donors/:id/reviews
+donorsRoutes.get('/:id/reviews', async (c) => {
+  const db = createDb(c.env.DB);
+  const donorId = c.req.param('id');
+
+  const result = await db
+    .select()
+    .from(db._.schema.donorReviews)
+    .leftJoin(users, eq(db._.schema.donorReviews.userId, users.id))
+    .where(eq(db._.schema.donorReviews.donorId, donorId))
+    .orderBy(sql`${db._.schema.donorReviews.createdAt} DESC`);
+
+  const data = result.map((r) => ({
+    ...r.donor_reviews,
+    user: r.users ? { id: r.users.id, name: r.users.name, avatarUrl: r.users.avatarUrl } : null,
+  }));
+
+  return c.json({ data });
+});
+
+// PATCH /api/donors/me/availability
+donorsRoutes.patch('/me/availability', requireAuth, async (c) => {
+  const db = createDb(c.env.DB);
+  const userId = getUserId(c);
+  const { availability } = await c.req.json();
+
+  await db.update(donors).set({
+    availability,
+    updatedAt: new Date().toISOString(),
+  }).where(eq(donors.id, userId));
+
+  return c.json({ success: true, availability });
+});
+
+// GET /api/donors/me/stats
+donorsRoutes.get('/me/stats', requireAuth, async (c) => {
+  const db = createDb(c.env.DB);
+  const userId = getUserId(c);
+
+  const donor = await db.select().from(donors).where(eq(donors.id, userId)).limit(1);
+  if (!donor.length) return c.json({ error: 'Not a donor' }, 404);
+
+  const pendingRequests = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(db._.schema.contactRequests)
+    .where(
+      and(
+        eq(db._.schema.contactRequests.donorId, userId),
+        eq(db._.schema.contactRequests.status, 'pending'),
+      )
+    );
+
+  const totalReviews = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(db._.schema.donorReviews)
+    .where(eq(db._.schema.donorReviews.donorId, userId));
+
+  const avgRating = await db
+    .select({ avg: sql<number>`AVG(${db._.schema.donorReviews.rating})` })
+    .from(db._.schema.donorReviews)
+    .where(eq(db._.schema.donorReviews.donorId, userId));
+
+  return c.json({
+    ...donor[0],
+    pendingRequests: Number(pendingRequests[0]?.count || 0),
+    totalReviews: Number(totalReviews[0]?.count || 0),
+    avgRating: Math.round((avgRating[0]?.avg || 0) * 10) / 10,
+  });
+});
