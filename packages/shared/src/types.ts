@@ -47,8 +47,8 @@ export interface Donor {
   user?: User;
 }
 
-export interface DonorPublic extends Donor {
-  user: Omit<User, 'phone' | 'email'>;
+export interface DonorPublic extends Omit<Donor, 'user'> {
+  user: Omit<User, 'email' | 'phone'>;
   phone?: string;
 }
 

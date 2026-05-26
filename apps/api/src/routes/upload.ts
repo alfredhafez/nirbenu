@@ -1,11 +1,14 @@
 import { Hono } from 'hono';
 import { requireAuth, getUserId } from '../middleware/auth';
+import { createDb } from '@nirbenu/db';
+import { users } from '@nirbenu/db';
+import { eq } from 'drizzle-orm';
 import type { Env } from '../index';
 
 export const uploadRoutes = new Hono<{ Bindings: Env; Variables: { userId?: string; userRole?: string } }>();
 
-// POST /api/upload/avatar
 uploadRoutes.post('/avatar', requireAuth, async (c) => {
+  const db = createDb(c.env.DB);
   const userId = getUserId(c);
   const formData = await c.req.formData();
   const file = formData.get('file');
@@ -15,17 +18,10 @@ uploadRoutes.post('/avatar', requireAuth, async (c) => {
   }
 
   const key = `avatars/${userId}/${Date.now()}-${file.name}`;
-  await c.env.STORAGE.put(key, file.stream(), {
-    httpMetadata: { contentType: file.type },
-  });
-
+  await c.env.STORAGE.put(key, file.stream(), { httpMetadata: { contentType: file.type } });
   const url = `${c.env.BASE_URL}/storage/${key}`;
 
-  // Update user avatar
-  const db = (c as never as { get: (k: string) => { _: { schema: { users: { update: Function; id: any } } } } }).get('db');
-  if (db) {
-    await db._.schema.users.update({ avatarUrl: url }).where(db._.schema.users.id.eq(userId));
-  }
+  await db.update(users).set({ avatarUrl: url }).where(eq(users.id, userId));
 
   return c.json({ url });
 });

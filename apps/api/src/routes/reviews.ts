@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createDb } from '@nirbenu/db';
-import { donorReviews, users } from '@nirbenu/db';
+import { donorReviews, users, donors, notifications } from '@nirbenu/db';
 import { reviewSchema } from '@nirbenu/shared';
 import { eq, desc, sql } from 'drizzle-orm';
 import { v4 as uuid } from 'uuid';
@@ -10,7 +10,6 @@ import type { Env } from '../index';
 
 export const reviewsRoutes = new Hono<{ Bindings: Env; Variables: { userId?: string; userRole?: string } }>();
 
-// POST /api/reviews
 reviewsRoutes.post('/', requireAuth, zValidator('json', reviewSchema), async (c) => {
   const db = createDb(c.env.DB);
   const userId = getUserId(c);
@@ -18,35 +17,19 @@ reviewsRoutes.post('/', requireAuth, zValidator('json', reviewSchema), async (c)
   const id = uuid();
   const now = new Date().toISOString();
 
-  await db.insert(donorReviews).values({
-    id,
-    donorId,
-    userId,
-    rating,
-    comment: comment || null,
-    createdAt: now,
+  await db.insert(donorReviews).values({ id, donorId, userId, rating, comment: comment ?? null, createdAt: now });
+
+  await db.insert(notifications).values({
+    id: uuid(), userId: donorId, type: 'new_review',
+    title: 'New Review', message: `You received a ${rating}-star review!`,
+    read: false, createdAt: now,
   });
 
-  // Notify donor
-  await db.insert(db._.schema.notifications).values({
-    id: uuid(),
-    userId: donorId,
-    type: 'new_review',
-    title: 'New Review',
-    message: `You received a ${rating}-star review!`,
-    read: false,
-    createdAt: now,
-  });
-
-  // Update donor response rate
-  await db.update(db._.schema.donors).set({
-    updatedAt: now,
-  }).where(eq(db._.schema.donors.id, donorId));
+  await db.update(donors).set({ updatedAt: now }).where(eq(donors.id, donorId));
 
   return c.json({ id, donorId, rating, createdAt: now }, 201);
 });
 
-// GET /api/reviews/donor/:id
 reviewsRoutes.get('/donor/:id', async (c) => {
   const db = createDb(c.env.DB);
   const donorId = c.req.param('id');
@@ -68,9 +51,5 @@ reviewsRoutes.get('/donor/:id', async (c) => {
     .from(donorReviews)
     .where(eq(donorReviews.donorId, donorId));
 
-  return c.json({
-    data,
-    avgRating: Math.round((avg[0]?.avg || 0) * 10) / 10,
-    totalReviews: Number(avg[0]?.count || 0),
-  });
+  return c.json({ data, avgRating: Math.round((avg[0]?.avg ?? 0) * 10) / 10, totalReviews: Number(avg[0]?.count ?? 0) });
 });

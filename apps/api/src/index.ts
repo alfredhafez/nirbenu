@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { createDb, createAuth } from '@nirbenu/db';
+import { createDb } from '@nirbenu/db';
 import { donorsRoutes } from './routes/donors';
 import { requestsRoutes } from './routes/requests';
 import { contactRoutes } from './routes/contact';

@@ -1,21 +1,21 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createDb } from '@nirbenu/db';
-import { donors, users } from '@nirbenu/db';
+import { donors, users, contactRequests, donorReviews } from '@nirbenu/db';
 import { donorSearchSchema } from '@nirbenu/shared';
 import { eq, and, like, sql, gte, lte, or } from 'drizzle-orm';
 import { requireAuth, getUserId, isAdmin } from '../middleware/auth';
 import type { Env } from '../index';
 
-export const donorsRoutes = new Hono<{ Bindings: Env; Variables: { userId?: string; userRole?: string } }>();
+type Variables = { db: ReturnType<typeof createDb>; userId?: string; userRole?: string };
 
-// GET /api/donors — Public donor search with filters
+export const donorsRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
+
 donorsRoutes.get('/', zValidator('query', donorSearchSchema), async (c) => {
   const db = createDb(c.env.DB);
   const { bloodGroup, district, area, availability, gender, verified, ranking, search, page, limit } = c.req.valid('query');
 
   const conditions = [];
-
   if (bloodGroup) conditions.push(eq(donors.bloodGroup, bloodGroup));
   if (district) conditions.push(eq(donors.district, district));
   if (area) conditions.push(like(donors.area, `%${area}%`));
@@ -27,40 +27,33 @@ donorsRoutes.get('/', zValidator('query', donorSearchSchema), async (c) => {
   let query = db.select().from(donors).leftJoin(users, eq(donors.id, users.id));
 
   if (search) {
-    conditions.push(
-      or(like(users.name, `%${search}%`), like(donors.area, `%${search}%`))
-    );
+    conditions.push(or(like(users.name, `%${search}%`), like(donors.area, `%${search}%`)));
   }
 
   if (conditions.length > 0) {
     query = query.where(and(...conditions));
   }
 
-  const totalResult = await db.select({ count: sql<number>`count(*)` }).from(donors).where(conditions.length > 0 ? and(...conditions) : undefined);
-  const total = Number(totalResult[0]?.count || 0);
+  const totalRow = await db.select({ count: sql<number>`count(*)` }).from(donors).where(
+    conditions.length > 0 ? and(...conditions) : undefined,
+  );
+  const total = Number(totalRow[0]?.count ?? 0);
 
   const result = await query.limit(limit).offset((page - 1) * limit);
 
-  // Strip phone/email from public response
   const data = result.map((r) => ({
     ...r.donors,
-    user: {
-      id: r.users?.id,
-      name: r.users?.name,
-      avatarUrl: r.users?.avatarUrl,
-      role: r.users?.role,
-    },
+    user: r.users ? {
+      id: r.users.id,
+      name: r.users.name,
+      avatarUrl: r.users.avatarUrl,
+      role: r.users.role,
+    } : null,
   }));
 
-  return c.json({
-    data,
-    total,
-    page,
-    totalPages: Math.ceil(total / limit),
-  });
+  return c.json({ data, total, page, totalPages: Math.ceil(total / limit) });
 });
 
-// GET /api/donors/nearby
 donorsRoutes.get('/nearby', async (c) => {
   const db = createDb(c.env.DB);
   const district = c.req.query('district');
@@ -80,18 +73,17 @@ donorsRoutes.get('/nearby', async (c) => {
 
   const data = result.map((r) => ({
     ...r.donors,
-    user: {
-      id: r.users?.id,
-      name: r.users?.name,
-      avatarUrl: r.users?.avatarUrl,
-      role: r.users?.role,
-    },
+    user: r.users ? {
+      id: r.users.id,
+      name: r.users.name,
+      avatarUrl: r.users.avatarUrl,
+      role: r.users.role,
+    } : null,
   }));
 
   return c.json({ data });
 });
 
-// GET /api/donors/:id — Single donor profile
 donorsRoutes.get('/:id', async (c) => {
   const db = createDb(c.env.DB);
   const id = c.req.param('id');
@@ -110,26 +102,23 @@ donorsRoutes.get('/:id', async (c) => {
   const isOwnProfile = currentUserId === id;
   const isAdminUser = isAdmin(c);
 
-  // Check if phone should be visible
   let phone: string | null = null;
   if (isOwnProfile || isAdminUser) {
-    phone = donor.users?.phone || null;
+    phone = donor.users?.phone ?? null;
   } else if (currentUserId) {
-    const contactReq = await db
+    const cr = await db
       .select()
-      .from(db._.schema.contactRequests)
+      .from(contactRequests)
       .where(
         and(
-          eq(db._.schema.contactRequests.donorId, id),
-          eq(db._.schema.contactRequests.requesterId, currentUserId),
-          eq(db._.schema.contactRequests.status, 'accepted'),
-          eq(db._.schema.contactRequests.numberVisible, true),
-        )
+          eq(contactRequests.donorId, id),
+          eq(contactRequests.requesterId, currentUserId),
+          eq(contactRequests.status, 'accepted'),
+          eq(contactRequests.numberVisible, true),
+        ),
       )
       .limit(1);
-    if (contactReq.length) {
-      phone = donor.users?.phone || null;
-    }
+    if (cr.length) phone = donor.users?.phone ?? null;
   }
 
   return c.json({
@@ -145,17 +134,16 @@ donorsRoutes.get('/:id', async (c) => {
   });
 });
 
-// GET /api/donors/:id/reviews
 donorsRoutes.get('/:id/reviews', async (c) => {
   const db = createDb(c.env.DB);
   const donorId = c.req.param('id');
 
   const result = await db
     .select()
-    .from(db._.schema.donorReviews)
-    .leftJoin(users, eq(db._.schema.donorReviews.userId, users.id))
-    .where(eq(db._.schema.donorReviews.donorId, donorId))
-    .orderBy(sql`${db._.schema.donorReviews.createdAt} DESC`);
+    .from(donorReviews)
+    .leftJoin(users, eq(donorReviews.userId, users.id))
+    .where(eq(donorReviews.donorId, donorId))
+    .orderBy(sql`${donorReviews.createdAt} DESC`);
 
   const data = result.map((r) => ({
     ...r.donor_reviews,
@@ -165,52 +153,45 @@ donorsRoutes.get('/:id/reviews', async (c) => {
   return c.json({ data });
 });
 
-// PATCH /api/donors/me/availability
 donorsRoutes.patch('/me/availability', requireAuth, async (c) => {
   const db = createDb(c.env.DB);
   const userId = getUserId(c);
   const { availability } = await c.req.json();
 
-  await db.update(donors).set({
-    availability,
-    updatedAt: new Date().toISOString(),
-  }).where(eq(donors.id, userId));
+  await db
+    .update(donors)
+    .set({ availability, updatedAt: new Date().toISOString() })
+    .where(eq(donors.id, userId));
 
   return c.json({ success: true, availability });
 });
 
-// GET /api/donors/me/stats
 donorsRoutes.get('/me/stats', requireAuth, async (c) => {
   const db = createDb(c.env.DB);
   const userId = getUserId(c);
 
-  const donor = await db.select().from(donors).where(eq(donors.id, userId)).limit(1);
-  if (!donor.length) return c.json({ error: 'Not a donor' }, 404);
+  const d = await db.select().from(donors).where(eq(donors.id, userId)).limit(1);
+  if (!d.length) return c.json({ error: 'Not a donor' }, 404);
 
-  const pendingRequests = await db
+  const pending = await db
     .select({ count: sql<number>`count(*)` })
-    .from(db._.schema.contactRequests)
-    .where(
-      and(
-        eq(db._.schema.contactRequests.donorId, userId),
-        eq(db._.schema.contactRequests.status, 'pending'),
-      )
-    );
+    .from(contactRequests)
+    .where(and(eq(contactRequests.donorId, userId), eq(contactRequests.status, 'pending')));
 
   const totalReviews = await db
     .select({ count: sql<number>`count(*)` })
-    .from(db._.schema.donorReviews)
-    .where(eq(db._.schema.donorReviews.donorId, userId));
+    .from(donorReviews)
+    .where(eq(donorReviews.donorId, userId));
 
-  const avgRating = await db
-    .select({ avg: sql<number>`AVG(${db._.schema.donorReviews.rating})` })
-    .from(db._.schema.donorReviews)
-    .where(eq(db._.schema.donorReviews.donorId, userId));
+  const avgR = await db
+    .select({ avg: sql<number>`AVG(${donorReviews.rating})` })
+    .from(donorReviews)
+    .where(eq(donorReviews.donorId, userId));
 
   return c.json({
-    ...donor[0],
-    pendingRequests: Number(pendingRequests[0]?.count || 0),
-    totalReviews: Number(totalReviews[0]?.count || 0),
-    avgRating: Math.round((avgRating[0]?.avg || 0) * 10) / 10,
+    ...d[0],
+    pendingRequests: Number(pending[0]?.count ?? 0),
+    totalReviews: Number(totalReviews[0]?.count ?? 0),
+    avgRating: Math.round((avgR[0]?.avg ?? 0) * 10) / 10,
   });
 });

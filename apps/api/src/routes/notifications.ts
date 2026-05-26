@@ -10,7 +10,7 @@ export const notificationsRoutes = new Hono<{ Bindings: Env; Variables: { userId
 // GET /api/notifications
 notificationsRoutes.get('/', requireAuth, async (c) => {
   const db = createDb(c.env.DB);
-  const userId = getUserId();
+  const userId = getUserId(c);
 
   const result = await db
     .select()

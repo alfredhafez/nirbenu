@@ -8,5 +8,4 @@ dist/
 .env.*.local
 .DS_Store
 *.log
-wrangler.toml
-!.wrnagler.example.toml
+
